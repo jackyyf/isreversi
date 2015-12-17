@@ -14,7 +14,7 @@ Each frame must be signed using its private key, and validated at the other side
 |:--------------:|:----------:|:--------------:|:-----------------:|
 |   2 bytes      |  2 bytes   | <= 65535 bytes |      64 bytes     |
 
-Note: payload length include field `Frame Type` and `packet payload`.
+Note: payload length DOES NOT include field `Frame Type` and `packet payload`.
 Signature of this frame is the ed25519 signature using send side private key, with all 3 fields above.
 
 ### 1.3 Type definition
@@ -73,7 +73,7 @@ This packet is only used during initialize process, which is the second packet c
 This packet is only used during initialize process, which is the second packet server response back to client, to confirm the establishment of the connection.    
 The fresh login options is used for registeration: if a client login first time (identified by its public key), they should register first.
 
-### 2.5 Login
+### 2.5 Register
 | Frame type | Direction | Username |
 |:----------:|:---------:|:--------:|
 |     4      |  C --> S  |  string  |
@@ -82,7 +82,7 @@ The fresh login options is used for registeration: if a client login first time 
 |:----------:|:---------:|:------:|
 |     4      |  C <-- S  |  uint8 |
 
-This packet is used for fresh logins after the establishment of the connection.  
+This packet is used for fresh logins to register after the establishment of the connection.  
 For client to server, the option in payload is username that client is willing to use.  
 For server to client, the only payload is result, 0 means accepted and can continue, where 1 means rejected, and client should try another username, using same packet.
 
@@ -164,11 +164,11 @@ Client send a packet to server, and server should response back with exactly sam
 For invalid request, server may use other action like send a chat message, or disconnect the client.
 
 ### 2.12 Place
-| Frame type | Direction |
-|:----------:|:---------:|
-|     11     |  C --> S  |
+| Frame type | Direction | Position |
+|:----------:|:---------:|:--------:|
+|     11     |  C --> S  |   uint8  |
 
-This packet is used to place a chess on board.  
+This packet is used to place a chess on board, the high 4 bit is x and low 4 bit is y.  
 Server doesn't response back, for a valid request, server should send "Board Update" instead.
 For invalid request, server may use other action like send a chat message, or disconnect the client.
 
