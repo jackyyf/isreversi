@@ -1,72 +1,189 @@
 # Protocol
 
-## 1. General Packet format
+## 1. Design
 
-	+--------------------+-----------+----------------+--------------+------------+----------------+-------------------+
-	| ed25519 public key | packet ID | payload length | packet flags | packet ack | packet payload | ed25519 signature |
-	|      32 bytes      |  2 bytes  |     10 bits    |    6 bits    |   2 bytes  |  <= 410 bytes  |      64 bytes     |
-	+--------------------+-----------+----------------+--------------+------------+----------------+-------------------+
+Protocol is based on uTP, a protocol which is widely used on BitTorrent protocol, and it's standardized by bittorrent [BEP0029](http://www.bittorrent.org/beps/bep_0029.html).
 
-### 1.1 ed25519 key pairs
-Ed25519 signatures are elliptic-curve signatures, and it has very small key (32 bytes) and signature size(64 bytes), which is very suitable for UDP transmissions, whose maximum packet size is guarenteed to only 512 bytes at least.
+### 1.1 Security: ed25519
+Ed25519 signatures are elliptic-curve signatures, and it has very small key (32 bytes) and signature size(64 bytes), and is extremely fast on modern CPUs (fits in L1 cache).
+Each frame must be signed using its private key, and validated at the other side.
 
-In this project, ed25519 public key is also designed to be used as "Session ID" or "Connection ID". This guarentees the same user will only have at most one connection.
+### 1.2 Frame structure
 
-### 1.2 Flags
-	+-+-+-+-+-+-+
-	|5|4|3|2|1|0|
-	+-+-+-+-+-+-+
-	|I|S|C|E|R|T|
-	|N|V|L|S|E|E|
-	|I|H|H|T|C|R|
-	|T|S|S|B|V|M|
-	+-+-+-+-+-+-+
+| Payload length | Frame type | Packet payload | ed25519 signature |
+|:--------------:|:----------:|:--------------:|:-----------------:|
+|   2 bytes      |  2 bytes   | <= 65535 bytes |      64 bytes     |
 
-Bit 5: INIT bit, indicates this is an connection initialize packet. Payload length MUST be 0, with no payload.  
-Bit 4: SVHS bit, indicates server has received an INIT packet, and is now willing to establish a connection.  
-Bit 3: CLHS bit, indicates client has received an SVHS packet, and responses according to challenge.  
-Bit 2: ESTB bit, indicates server has received an CLHS packet, and responses according to challenge.  
-Bit 1: RECV bit, indicates one side has received a packet, and last in-order packet ID is in packet ack.  
-Bit 0: TERM bit, indicates one side has terminated the connection.  
+Note: payload length include field `Frame Type` and `packet payload`.
+Signature of this frame is the ed25519 signature using send side private key, with all 3 fields above.
 
-### 1.4 Signatures
-Signature part of the packet contains ed25519 signature of following fields: "packet ID", "packet length", "packet ack", "packet payload".  
-Signatures are designed to protect clients away from MITM attack.  
-A packet with invalid signature should be dropped sliently.
+### 1.3 Type definition
 
-### 1.5 Error handling
+#### 1.3.1 Integers
+* All integers are **big endian** encoded.  
+* Size for `int8`, `uint8` is 1 byte.
+* Size for `int16`, `uint16` is 2 byte.
+* Size for `int32`, `uint32` is 4 byte.
+* Size for `int64`, `uint64` is 8 byte.
+* `int` and `uint` are in variable length, using `varint` encoding specified in [protobuf](https://developers.google.com/protocol-buffers/docs/encoding#varints).
+For signed version `int`, refer to [this section](https://developers.google.com/protocol-buffers/docs/encoding#types) of protobuf.
 
-#### 1.5.1 Generic definition
-Both sides MUST hold a window of exactly 5 packet, and the ACK number is the last received in-order packet ID.  
-Both sides SHOULD initialize a retransmission after 2 duplicate ACKs.  
-Both sides SHOULD initialize a retransmission 2, 4, 8, 16 seconds after no ACK from the other side. No ACK from the other side after 32 seconds, the connection SHOULD BE closed.  
-Duplicate packets (same packet ID) MUST be dropped and ignored.
+#### 1.3.2 Float points
+Only float32 and float64 are supported, which are **big endian** encoded in IEEE754 format.
 
-#### 1.5.2 Duplicate ACKs received
-When 2 duplicate ACKs are received, sender side SHOULD start retransmission from packet ID = ACK + 1.  
-After initialization of the retransmission, duplicate ACKs SHOULD be dropped, and handled by timeout handler.
+#### 1.3.3 Strings
+Strings are in variable length, which is prefixed by its length using `uint16` type.
+All strings **MUST BE** encoded in UTF-8.
 
-### 1.5.3 No ACK after specific time
-When specific time passed and no ACK are received, sender side SHOULD retransmissit ONLY packet LAST\_ACK + 1. After an ACK was received properly (ACK = LAST\_ACK + 1), now sender side MAY expand send window to 5 packet.  
+#### 1.3.4 Bytes (binary)
+Bytes can be in either variable length or fixed length(specified in protocol).
+For variable length binary bytes, length in `uint16` type should be added before actually binary data.
 
-## 2. Protocol
+#### 1.3.5 Tuple
+A tuple of some types is simply concat them together.
 
-### 2.1 Handshake
+## 2. Frame Types
 
-Handshake has 4 steps:
-	C -> S: A packet with random initial packet ID, and with INIT bit set. ACK field MUST be 0.
-	S -> C: A packet with another initial packet ID, and with SVHS bit set. ACK field MUST be client's packet ID. Payload contains a 16 bytes long random binary string.
-	C -> S: Response a packet with CLHS and RECV bit set. ACK field MUST be server's packet ID. Payload contains 32 bytes: server's 16 byte payload, and another 16 bytes long random binary string.
-	(Client starts its error handling process)
-	S -> C: Response a packet with ESTB and RECV bit set. ACK field MUST be client's packet ID. Payload contains 16 bytes: client's 16 byte random string.
-	(Server starts its error handling process)
-	(Connection established)
+### 2.1 Client Hello
+| Frame type | Direction | Client pubkey | Client challenge |
+|:----------:|:---------:|:-------------:|:----------------:|
+|     0      |  C --> S  |    32 bytes   |     32 bytes     |
 
-In order to prevent similar "SYN Flood attack" in TCP, server MAY hide "cookie" in the SVHS packet.  
+This packet is only used during initialize process, which is the first packet client sent to server, give its public key and a random challenge string.
 
-### 2.2 Termination
+### 2.2 Server Hello
+| Frame type | Direction | Server pubkey | Client challenge | Server challenge |
+|:----------:|:---------:|:-------------:|:----------------:|:----------------:|
+|     1      |  C <-- S  |    32 bytes   |     32 bytes     |     32 bytes     |
 
-Termination has 3 steps:
-	A -> B: Send a packet with TERM bit set.
-	B -> A: Send a packet with TERM and RECV bit set.
-	A -> B: Send a packet with RECV bit set.
+This packet is only used during initialize process, which is the first packet server responsed back to client, give its public key, client's chanllenge and server's challenge.
+
+### 2.3 Client Confirm
+| Frame type | Direction | Server challenge |
+|:----------:|:---------:|:----------------:|
+|     2      |  C --> S  |     32 bytes     |
+
+This packet is only used during initialize process, which is the second packet client sent to server, with only server challenge. Since packet is signed, now server is confirmed that client has private key for that public key.
+
+### 2.4 Server Confirm
+| Frame type | Direction | Fresh login |
+|:----------:|:---------:|:-----------:|
+|     3      |  C <-- S  |    uint8    |
+
+This packet is only used during initialize process, which is the second packet server response back to client, to confirm the establishment of the connection.    
+The fresh login options is used for registeration: if a client login first time (identified by its public key), they should register first.
+
+### 2.5 Login
+| Frame type | Direction | Username |
+|:----------:|:---------:|:--------:|
+|     4      |  C --> S  |  string  |
+
+| Frame type | Direction | Result |
+|:----------:|:---------:|:------:|
+|     4      |  C <-- S  |  uint8 |
+
+This packet is used for fresh logins after the establishment of the connection.  
+For client to server, the option in payload is username that client is willing to use.  
+For server to client, the only payload is result, 0 means accepted and can continue, where 1 means rejected, and client should try another username, using same packet.
+
+### 2.6 Quit / Kick
+| Frame type | Direction | Reason |
+|:----------:|:---------:|:------:|
+|     5      |  C <-> S  | string |
+
+This packet is used for either quit request by client, or kick notification for server.  
+After sending the packet, they should wait at least 1 second to close the connection.
+
+### 2.7 Room list
+| Frame type | Direction |
+|:----------:|:---------:|
+|     6      |  C --> S  |
+
+| Frame type | Direction |   Data   |
+|:----------:|:---------:|:--------:|
+|     6      |  C <-- S  |   bytes  |
+
+This packet is used to obtain room information.  
+Client send a packet with no payload to request data from server.  
+Server should response back with same frame type, and contains data for room list.  
+
+Data is in a tuple of tuple(uint16, string, string, string).  
+For each tuple, the corresponding field are Room ID, Room Title, Player A, Player B.
+
+### 2.8 Player list
+| Frame type | Direction |
+|:----------:|:---------:|
+|     7      |  C --> S  |
+
+| Frame type | Direction |   Data   |
+|:----------:|:---------:|:--------:|
+|     7      |  C <-- S  |   bytes  |
+
+This packet is used to obtain player list.  
+Client send a packet with no payload to request data from server.  
+Server should response back with same frame type, and contains data for player list.
+
+Data is in a tuple of tuple(string, uint32, uint32).
+For each tuple, the corresponding field are Player Name, Game wins, Game lose.
+
+### 2.9 Join Game
+| Frame type | Direction | Room ID |
+|:----------:|:---------:|:-------:|
+|     8      |  C --> S  | uint16  |
+
+| Frame type | Direction | Result |
+|:----------:|:---------:|:------:|
+|     8      |  C <-- S  | uint8  |
+
+This packet is used to join a game.  
+Client send a packet with room ID to server.  
+Server should response back with same frame type, and contains result for previous action.  
+
+Result list:  
+0: Join OK, you are now inside game you are willing to join.  
+1: Join failed, room does not exists.  
+2: Join failed, room is full.  
+3: Join failed, you are in another room.
+
+### 2.10 Leave game
+| Frame type | Direction |
+|:----------:|:---------:|
+|     9      |  C <-> S  |
+
+This packet is used to leave a room.  
+Client send a packet to server, and server should response back with exactly same packet, since the only reason that will cause leaving to fail is he is not in the room.  
+For invalid request, server may use other action like send a chat message, or disconnect the client.
+
+### 2.11 Game restart
+| Frame type | Direction |
+|:----------:|:---------:|
+|     10     |  C <-> S  |
+
+This packet is used to restart a game. Game can only be restarted at end state (one side has win the game, or a tie).  
+Client send a packet to server, and server should response back with exactly same packet.  
+For invalid request, server may use other action like send a chat message, or disconnect the client.
+
+### 2.12 Place
+| Frame type | Direction |
+|:----------:|:---------:|
+|     11     |  C --> S  |
+
+This packet is used to place a chess on board.  
+Server doesn't response back, for a valid request, server should send "Board Update" instead.
+For invalid request, server may use other action like send a chat message, or disconnect the client.
+
+### 2.13 Board Update
+| Frame type | Direction |  Placed  |  Color  |
+|:----------:|:---------:|:--------:|:-------:|
+|     12     |  C <-- S  |  uint64  |  uint64 |
+
+This packet is update the current state of board. Since the board is 8x8, each bit of the first uint64 "Placed" is used to set if a point is placed, and the second uint64 set its color, white = 0, black = 1.
+
+### 2.14 Chat message
+| Frame type | Direction | Player | Message |
+|:----------:|:---------:|:------:|:-------:|
+|     13     |  C <-> S  | string |  string |
+
+This packet is used to send and receive chat message.  
+For client sent packet, player is the name he wants to send to, or a empty string if he wants to broadcast.  
+For server sent packet, player is the name who sends the message, or a empty string indicates it's server's notification.
