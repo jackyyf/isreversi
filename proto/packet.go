@@ -1,10 +1,11 @@
 package proto
 
 import (
-	"github.com/agl/ed25519"
 	"encoding/binary"
-	"io"
 	"errors"
+	"io"
+
+	"github.com/agl/ed25519"
 )
 
 var ErrNil = errors.New("Can't parse packet into nil")
@@ -13,7 +14,7 @@ var ErrPayload = errors.New("Invalid format of payload.")
 
 type RawPacket struct {
 	frametype uint16
-	payload []byte
+	payload   []byte
 	signature *[ed25519.SignatureSize]byte
 }
 
@@ -37,14 +38,14 @@ func ReadPacket(reader io.Reader) (pkt *RawPacket, err error) {
 	}
 	return &RawPacket{
 		frametype: frametype,
-		payload: payload,
+		payload:   payload,
 		signature: signature,
 	}, nil
 }
 
 func (p *RawPacket) Sign(privk *[ed25519.PrivateKeySize]byte) {
 	length := uint16(len(p.payload))
-	buf := make([]byte, length + 4)
+	buf := make([]byte, length+4)
 	binary.BigEndian.PutUint16(buf, length)
 	binary.BigEndian.PutUint16(buf[2:], p.frametype)
 	copy(buf[4:], p.payload)
@@ -56,7 +57,7 @@ func (p *RawPacket) Validate(pubk *[ed25519.PublicKeySize]byte) bool {
 		return false
 	}
 	length := uint16(len(p.payload))
-	buf := make([]byte, length + 4)
+	buf := make([]byte, length+4)
 	binary.BigEndian.PutUint16(buf, length)
 	binary.BigEndian.PutUint16(buf[2:], p.frametype)
 	copy(buf[4:], p.payload)
@@ -68,7 +69,7 @@ func (p *RawPacket) Bytes() []byte {
 		return nil
 	}
 	length := uint16(len(p.payload))
-	buf := make([]byte, length + 4 + ed25519.SignatureSize)
+	buf := make([]byte, length+4+ed25519.SignatureSize)
 	binary.BigEndian.PutUint16(buf, length)
 	binary.BigEndian.PutUint16(buf[2:], p.frametype)
 	copy(buf[4:], p.payload)
@@ -84,18 +85,18 @@ type Packet interface {
 
 type Player struct {
 	name string
-	win uint32
+	win  uint32
 	lose uint32
 }
 
 type Room struct {
-	id uint16
-	title string
+	id      uint16
+	title   string
 	players [2]string
 }
 
 type ClientHello struct {
-	pubkey *[ed25519.PublicKeySize]byte
+	pubkey    *[ed25519.PublicKeySize]byte
 	challenge *[32]byte
 }
 
@@ -103,7 +104,7 @@ func (p *ClientHello) Payload() []byte {
 	if p.pubkey == nil || p.challenge == nil {
 		return nil
 	}
-	ret := make([]byte, ed25519.PublicKeySize + 32)
+	ret := make([]byte, ed25519.PublicKeySize+32)
 	copy(ret, *p.pubkey)
 	copy(ret[ed25519.PublicKeySize:], *p.challenge)
 }
@@ -113,9 +114,9 @@ func (p *ClientHello) Packet() *RawPacket {
 	if payload == nil {
 		return nil
 	}
-	return &RawPacket {
+	return &RawPacket{
 		frametype: 0,
-		payload: payload,
+		payload:   payload,
 	}
 }
 
@@ -126,7 +127,7 @@ func (p *ClientHello) Parse(pkt *RawPacket) error {
 	if pkt.frametype != 0 {
 		return ErrType
 	}
-	if len(pkt.payload) != 32 + ed25519.PublicKeySize {
+	if len(pkt.payload) != 32+ed25519.PublicKeySize {
 		return ErrPayload
 	}
 	p.pubkey = new([ed25519.PublicKeySize]byte)
@@ -137,17 +138,119 @@ func (p *ClientHello) Parse(pkt *RawPacket) error {
 }
 
 type ServerHello struct {
-	pubkey *[ed25519.PublicKeySize]byte
+	pubkey   *[ed25519.PublicKeySize]byte
 	clientch *[32]byte
 	serverch *[32]byte
+}
+
+func (p *ServerHello) Payload() []byte {
+	if p.pubkey == nil || p.clientch == nil || p.serverch == nil {
+		return nil
+	}
+	ret := make([]byte, ed25519.PublicKeySize+32+32)
+	copy(ret, *p.pubkey)
+	copy(ret[ed25519.PublicKeySize:], *p.clientch)
+	copy(ret[ed25519.PublicKeySize+32:], *p.serverch)
+}
+
+func (p *ServerHello) Packet() *RawPacket {
+	payload := p.Payload()
+	if payload == nil {
+		return nil
+	}
+	return &RawPacket{
+		frametype: 1,
+		payload:   payload,
+	}
+}
+
+func (p *ServerHello) Parse(pkt *RawPacket) error {
+	if p == nil {
+		return ErrNil
+	}
+	if pkt.frametype != 1 {
+		return ErrType
+	}
+	if len(pkt.payload) != ed25519.PublicKeySize+32+32 {
+		return ErrPayload
+	}
+	p.pubkey = new([ed25519.PublicKeySize]byte)
+	p.clientch = new([32]byte)
+	p.serverch = new([32]byte)
+	copy((*p.pubkey)[:], pkt.payload)
+	copy((*p.clientch)[:], pkt.payload[ed25519.PublicKeySize:])
+	copy((*p.serverch)[:], pkt.payload[ed25519.PublicKeySize+32:])
+	return nil
 }
 
 type ClientConfirm struct {
 	challenge *[32]byte
 }
 
+func (p *ClientConfirm) Payload() []byte {
+	if p.challenge == nil {
+		return nil
+	}
+	return p.challenge[:]
+}
+
+func (p *ClientConfirm) Packet() *RawPacket {
+	payload := p.Payload()
+	if payload == nil {
+		return nil
+	}
+	return &RawPacket{
+		frametype: 2,
+		payload:   payload,
+	}
+}
+
+func (p *ClientConfirm) Parse(pkt *RawPacket) error {
+	if p == nil {
+		return ErrNil
+	}
+	if pkt.frametype != 2 {
+		return ErrType
+	}
+	if len(pkt.payload) != 32 {
+		return ErrPayload
+	}
+	p.challenge = new([ed25519.PublicKeySize]byte)
+	copy((*p.challenge)[:], pkt.payload)
+	return nil
+}
+
 type ServerConfirm struct {
 	fresh uint8
+}
+
+func (p *ServerConfirm) Payload() []byte {
+	return []byte{p.fresh}
+}
+
+func (p *ServerConfirm) Packet() *RawPacket {
+	payload := p.Payload()
+	if payload == nil {
+		return nil
+	}
+	return &RawPacket{
+		frametype: 3,
+		payload:   payload,
+	}
+}
+
+func (p *ServerConfirm) Parse(pkt *RawPacket) error {
+	if p == nil {
+		return ErrNil
+	}
+	if pkt.frametype != 3 {
+		return ErrType
+	}
+	if len(pkt.payload) != 1 {
+		return ErrPayload
+	}
+	p.fresh = uint8(pkt.payload[0])
+	return nil
 }
 
 type ClientRegister struct {
@@ -199,10 +302,10 @@ type ClientPlace struct {
 
 type ServerBoardUpdate struct {
 	placed uint64
-	color uint64
+	color  uint64
 }
 
 type ChatMessage struct {
-	user string
+	user    string
 	message string
 }
