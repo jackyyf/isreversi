@@ -1,0 +1,414 @@
+<h1 id="isreversi">Isreversi</h1>
+<h3 id="余一夫-13307130355">余一夫 13307130355</h3>
+<p>Isreversi是一个基于命令行的黑白棋游戏，使用golang编写，服务器设计默认支持128位用户同时在线，性能测试上能够支持超过十万个并发连接。</p>
+<h2 id="网络传输">1. 网络传输</h2>
+<p>Isreversi使用的是UDP协议，在UDP上使用了uTP作为可靠连接层。uTP作为一个轻量级的可靠流传输协议，相比于TCP的多篇RFC进行描述和修正，uTP作为BitTorrent的传输协议只有一篇BitTorrent官方的协议规范<a href="http://www.bittorrent.org/beps/bep_0029.html">BEP0029</a>，协议简单明了轻便。同时uTP本身也是针对大流量传输做了优化，其防阻塞算法简单有效，同时其防阻塞算法也是TCP友好的，不会存在uTP抢占TCP带宽的情况。<br />
+协议的实现借鉴了一个第三方的utp包: github.com/anacrolix/utp。在修改后的uTP实现，只有1200行golang代码，实现了一个golang的网络流传输结构net.Conn。</p>
+<h2 id="安全层">2. 安全层</h2>
+<p>Isreversi的协议的每次传输为一个帧，在每次连接建立时，都会进行一次Challenge-Response的公钥交换，其中有32字节随机生成的Payload以保证对方的确为我们所连接的服务器。之后的每个传输帧，都会使用事先协商好的密钥签名，以保证通讯内容不会被篡改。<br />
+这次的安全签名算法使用的是ed25519，ed25519相比于其他的签名算法，有公钥私钥签名长度都十分短，并且签名速度相比于RSA和ECDSA等相比能够有更高的计算速度，能减轻服务器端的计算压力。</p>
+<h2 id="传输协议">3. 传输协议</h2>
+<h3 id="帧结构">3.1 帧结构</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Payload length</th>
+<th align="center">Frame type</th>
+<th align="center">Packet payload</th>
+<th align="center">ed25519 signature</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">2 bytes</td>
+<td align="center">2 bytes</td>
+<td align="center">&lt;= 65535 bytes</td>
+<td align="center">64 bytes</td>
+</tr>
+</tbody>
+</table>
+<p>Payload长度域记录的长度不包含Frame type域和ed25519签名域的长度，因而一个帧的长度最大可以为65535 + 68 = 65603字节 ed25519签名域包含前面的所有域: 长度、帧类型和帧内容。</p>
+<h3 id="类型定义">3.2 类型定义</h3>
+<h4 id="整形">3.2.1 整形</h4>
+<ul>
+<li>所有的整形都使用大端法(Big Endian)编码</li>
+<li><code>int8</code>, <code>uint8</code>的长度是1字节</li>
+<li><code>int16</code>, <code>uint16</code>的长度是2字节</li>
+<li><code>int32</code>, <code>uint32</code>的长度是4字节</li>
+<li><code>int64</code>, <code>uint64</code>的长度是8字节</li>
+<li><code>int</code>, <code>uint</code>是变长的数字编码，使用了Protobuf的VarInt编码，具体编码方式可参阅<a href="https://developers.google.com/protocol-buffers/docs/encoding#varints">Protobuf文档</a>. 同时对于变长有符号数，使用的是ZigZag算法，具体可参阅<a href="https://developers.google.com/protocol-buffers/docs/encoding#types">ProtoBuf章节</a>。</li>
+</ul>
+<h4 id="浮点数">3.2.2 浮点数</h4>
+<p>只允许使用IEEE754规范中指明的32位与64位浮点数，使用<code>float32</code>和<code>float64</code>表示</p>
+<h4 id="字符串string">3.2.3 字符串(string)</h4>
+<p>字符串为一个变长的数据结构，其前两字节为一个<code>uint16</code>类型，表示字符串的字节长度，之后的长度字节为字符串的内容。<br />
+所有字符串<strong>必须</strong>是合法UTF-8编码的字符。</p>
+<h4 id="二进制流bytes">3.2.4 二进制流(bytes)</h4>
+<p>二进制流与字符串类似，唯一的区别是其内容可以为任意二进制流，而不必是一个合法的UTF-8字符串。 对于协议中写明的定长二进制流，则前面不包含长度的<code>uint16</code>类型。</p>
+<h4 id="元组tuple">3.2.5 元组(tuple)</h4>
+<p>元组的表示方法为按照元组内部各类型依次表示即可。</p>
+<h2 id="帧类型">4 帧类型</h2>
+<h3 id="client-hello">4.1 Client Hello</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Client pubkey</th>
+<th align="center">Client challenge</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">0</td>
+<td align="center">C --&gt; S</td>
+<td align="center">32 bytes</td>
+<td align="center">32 bytes</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧只能在客户端刚连接上服务器后用于握手，其内容包含客户端的公钥和32字节随机Challenge二进制流。</p>
+<h3 id="server-hello">4.2 Server Hello</h3>
+<p>| Frame type | Direction | Server pubkey | Client challenge | Server challenge | |:----------:|:---------:|:-------------:|:----------------:|:----------------:| | 1 | C &lt;-- S | 32 bytes | 32 bytes | 32 bytes | 这个帧只能用于响应客户端的Client Hello请求，其中包含服务器的32字节公钥，客户端发来的32字节随机Challenge二进制流，和额外的服务器端生成的32字节随机二进制流。由于所有包都需要使用公钥签名，故带上随机生成的32字节Client Challenge即可保证服务器端拥有起声称的公钥的私钥。</p>
+<h3 id="client-confirm">4.3 Client Confirm</h3>
+<p>| Frame type | Direction | Server challenge | |:----------:|:---------:|:----------------:| | 2 | C --&gt; S | 32 bytes | 这个帧只能用于响应服务器的Server Hello请求，其中包含服务器端发来的32字节Challenge二进制流，配合该帧合法的签名即可验证客户端的身份。</p>
+<h3 id="server-confirm">4.4 Server Confirm</h3>
+<p>| Frame type | Direction | |:----------:|:---------:| | 3 | C &lt;-- S | 这个帧只能用于响应客户端的Client Confirm请求。在客户端收到该帧以后，双向的链接即正式建立。</p>
+<h3 id="login">4.5 Login</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Username</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">4</td>
+<td align="center">C --&gt; S</td>
+<td align="center">string</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">4</td>
+<td align="center">C &lt;-- S</td>
+<td align="center">uint8</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧用于在连接完成后登录服务器使用。<br />
+其中客户端向服务器端发送的帧包含一个string类型，为客户端希望使用的用户名。<br />
+服务器的响应包含一个uint8类型，若其为0，则表示登录成功，若非0则表示登录失败，客户端应当使用不同的用户名，继续使用帧类型4重新尝试登录直到成功或服务器因为尝试太多而断开连接。</p>
+<h3 id="quit-kick">4.6 Quit / Kick</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">5</td>
+<td align="center">C &lt;-&gt; S</td>
+<td align="center">string</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧是用于正常终止连接使用的，在服务器端主动踢出用户时，或者客户端主动退出时使用。其包含一个string类型，内容为退出或被踢出的原因。</p>
+<h3 id="room-list">4.7 Room List</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">6</td>
+<td align="center">C --&gt; S</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Data</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">6</td>
+<td align="center">C &lt;-- S</td>
+<td align="center">tuple</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧是用于处理房间列表信息的。客户端发送一个没有任何内容的，帧类型为6的包给服务器端。<br />
+而服务器端应当同样使用类型为6的帧返回，带上一个tuple，其中包含多个tuple，每个tuple为每个房间的房间信息，分别为uint16的房间ID，string的执黑用户，string的执白用户。</p>
+<h3 id="player-list">4.8 Player List</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">7</td>
+<td align="center">C --&gt; S</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Data</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">7</td>
+<td align="center">C &lt;-- S</td>
+<td align="center">tuple</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧是用于处理玩家列表信息的。客户端发送一个没有任何内容的，帧类型为7的包给服务器端。<br />
+而服务器端应当同样使用类型为7的帧返回，带上一个tuple，其中包含多个string，为每个用户的用户名。</p>
+<h3 id="join-game">4.9 Join Game</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Room ID</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">8</td>
+<td align="center">C --&gt; S</td>
+<td align="center">uint16</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">8</td>
+<td align="center">C &lt;-- S</td>
+<td align="center">uint8</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧用于加入某个游戏房间，客户端发送给服务器端的帧中，包含一个uint16类型，为其房间号。<br />
+服务器应当同样使用帧类型8返回，包含一个uint8的结果信息: * 0: 加入成功 * 1: 加入失败，房间不存在 * 2: 加入失败，房间已满 * 3: 加入失败，你正在另一个游戏中 * 4 ~ 255: 保留类型</p>
+<h3 id="leave-game">4.10 Leave Game</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">9</td>
+<td align="center">C &lt;-&gt; S</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧用于离开游戏房间，由于本帧不需要状态信息，发送本包后用户一定处于游戏大厅，故服务器端只需要响应同样的帧确认即可。</p>
+<h3 id="game-restart">4.11 Game restart</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">10</td>
+<td align="center">C --&gt; S</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧用于向服务器发送准备/重开请求。这个请求并没有任何返回，服务器对其进行处理即可。</p>
+<h3 id="place">4.12 Place</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Position</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">11</td>
+<td align="center">C --&gt; S</td>
+<td align="center">uint8</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧用于向棋盘上放一个棋子，对于position，高4位为x，低4位为y<br />
+服务器对这个请求的响应应当通过Room Update，或者Message进行，更新棋盘或者通知对方发生错误。</p>
+<h3 id="room-update">4.13 Room Update</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Placed</th>
+<th align="center">Color</th>
+<th align="center">Turn</th>
+<th align="center">White</th>
+<th align="center">Black</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">12</td>
+<td align="center">C &lt;-- S</td>
+<td align="center">uint64</td>
+<td align="center">uint64</td>
+<td align="center">uint8</td>
+<td align="center">string</td>
+<td align="center">string</td>
+</tr>
+</tbody>
+</table>
+<p>这个帧用于传向客户端，告诉客户端更新其棋盘状态。<br />
+Placed为一个64bit的BitSet，用于表示每个位置是否有棋子<br />
+Color为对于每个Placed标记的位置，0表示其为黑色，1为白色<br />
+Turn表示当前游戏的状态，0表示游戏结束/未开始，1表示执黑方下子，2表示执白方下子<br />
+White和Black分别为房间内执黑和执白用户的用户名</p>
+<h3 id="chat-message">4.14 Chat Message</h3>
+<table>
+<thead>
+<tr class="header">
+<th align="center">Frame type</th>
+<th align="center">Direction</th>
+<th align="center">Player</th>
+<th align="center">Message</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="center">13</td>
+<td align="center">C &lt;-&gt; S</td>
+<td align="center">string</td>
+<td align="center">string</td>
+</tr>
+</tbody>
+</table>
+<p>这个包用于服务器和客户端发送聊天信息，Player为发送方/接收方用户名，而Message为内容。<br />
+对于服务器发送的包，Player为空表示为系统公告，不为空则为其他用户的私信。</p>
+<h2 id="服务器端">5 服务器端</h2>
+<h3 id="服务器端设置">5.1 服务器端设置</h3>
+<p>服务器默认监听在UDP 5428端口上，最大允许65536个游戏房间(由于Room ID限制)，无限制用户个数。</p>
+<h3 id="服务器功能">5.2 服务器功能</h3>
+<p>服务器端的终端使用了readline，用tab可以弹出补全菜单，会列出当前可用的所有命令:</p>
+<div class="figure">
+<img src="image/server_readline.png" alt="Tab Completion" />
+<p class="caption">Tab Completion</p>
+</div>
+<h4 id="exit命令">5.2.1 Exit命令</h4>
+<p>Exit命令用于退出服务器端，在退出前，他会踢出所有的用户，告诉用户服务器已经关闭。</p>
+<h4 id="kick命令">5.2.2 Kick命令</h4>
+<p>Kick命令用于踢出某个用户，允许带上原因告诉客户端其被踢出的原因。</p>
+<h4 id="msg命令">5.2.3 Msg命令</h4>
+<p>Msg命令用于广播或者给特定用户发送消息。</p>
+<h4 id="users命令">5.2.4 Users命令</h4>
+<p>Users用于列出所有连接的用户列表</p>
+<div class="figure">
+<img src="image/server_users.png" alt="Users List" />
+<p class="caption">Users List</p>
+</div>
+<h4 id="newgame命令">5.2.5 Newgame命令</h4>
+<p>Newgame用于新开一个游戏房间</p>
+<h4 id="games命令">5.2.6 Games命令</h4>
+<p>Games命令用于列出所有的游戏列表及其参与用户</p>
+<div class="figure">
+<img src="image/server_games.png" alt="Games List" />
+<p class="caption">Games List</p>
+</div>
+<h4 id="watch命令">5.2.7 Watch命令</h4>
+<p>Watch命令用于观察某个房间的状态</p>
+<div class="figure">
+<img src="image/server_watch.png" alt="Watch Game" />
+<p class="caption">Watch Game</p>
+</div>
+<h4 id="closegame命令">5.2.8 Closegame命令</h4>
+<p>Closegame命令用于将某个游戏房间关闭，并踢出其中所有游戏用户。</p>
+<h2 id="客户端">6 客户端</h2>
+<h3 id="客户端设置">6.1 客户端设置</h3>
+<p>客户端会在启动时连接本地的UDP 5428端口，连接失败会自动退出</p>
+<h3 id="客户端功能">6.2 客户端功能</h3>
+<p>客户端同样使用了readline，使用tab弹出当前所有可用命令:</p>
+<div class="figure">
+<img src="image/client_readline.png" alt="Client Command" />
+<p class="caption">Client Command</p>
+</div>
+<h4 id="login命令">6.2.1 Login命令</h4>
+<p>Login命令用于登录到服务器，对于不合法的用户名，服务器会拒绝登录并弹出提示</p>
+<h4 id="games命令-1">6.2.2 Games命令</h4>
+<p>功能同服务器端Games命令</p>
+<h4 id="users命令-1">6.2.3 Users命令</h4>
+<p>功能同服务器端Users命令</p>
+<h4 id="join命令">6.2.4 Join命令</h4>
+<p>加入某个房间，在对方加入时会有提示</p>
+<div class="figure">
+<img src="image/client_join.png" alt="Join Notification" />
+<p class="caption">Join Notification</p>
+</div>
+<h4 id="place命令">6.2.5 Place命令</h4>
+<p>在棋盘上x y下子</p>
+<div class="figure">
+<img src="image/client_place.png" alt="Client Place" />
+<p class="caption">Client Place</p>
+</div>
+<h4 id="restart命令">6.2.6 Restart命令</h4>
+<p>申请重新开始棋局，在没有开始时则为准备。准备时对方会收到提示，可参见Join命令图</p>
+<h4 id="leave命令">6.2.7 Leave命令</h4>
+<p>离开房间，正在进行的游戏自动终止。</p>
+<h4 id="exit命令-1">6.2.8 Exit命令</h4>
+<p>关闭程序，并向服务器发送退出请求。</p>
+<h2 id="总结">7 总结</h2>
+<p>本次实验我更多关注于协议本身的实现，包括基于UDP实现一个可靠的流协议uTP，实现一个保护包不被篡改的签名系统，一个科学的简单高效的帧格式设计等等，故本次游戏功能虽完整，然操作比较不便。不过在本次实验中，从网络层到传输层到应用层，整体的设计让我体会到了设计的难度，同时也领会了设计的趣味。</p>
+<h2 id="代码">8 代码</h2>
+<p>本源代码位于github.com/jackyyf/isreversi，所有包均位于该repo的相对路径。</p>
+<ul>
+<li>utp包为一个utp协议的实现</li>
+<li>proto包为帧的底层结构实现</li>
+<li>common包为游戏和用户类型及其操作的类型定义</li>
+<li>server包包含服务器端的main包</li>
+<li>client包包含客户端的main包</li>
+</ul>

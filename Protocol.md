@@ -66,12 +66,11 @@ This packet is only used during initialize process, which is the first packet se
 This packet is only used during initialize process, which is the second packet client sent to server, with only server challenge. Since packet is signed, now server is confirmed that client has private key for that public key.
 
 ### 2.4 Server Confirm
-| Frame type | Direction | Fresh login |
-|:----------:|:---------:|:-----------:|
-|     3      |  C <-- S  |    uint8    |
+| Frame type | Direction |
+|:----------:|:---------:|
+|     3      |  C <-- S  |
 
 This packet is only used during initialize process, which is the second packet server response back to client, to confirm the establishment of the connection.    
-The fresh login options is used for registeration: if a client login first time (identified by its public key), they should register first.
 
 ### 2.5 Register
 | Frame type | Direction | Username |
@@ -82,7 +81,7 @@ The fresh login options is used for registeration: if a client login first time 
 |:----------:|:---------:|:------:|
 |     4      |  C <-- S  |  uint8 |
 
-This packet is used for fresh logins to register after the establishment of the connection.  
+This packet is used for to register after the establishment of the connection.  
 For client to server, the option in payload is username that client is willing to use.  
 For server to client, the only payload is result, 0 means accepted and can continue, where 1 means rejected, and client should try another username, using same packet.
 
@@ -107,8 +106,8 @@ This packet is used to obtain room information.
 Client send a packet with no payload to request data from server.  
 Server should response back with same frame type, and contains data for room list.  
 
-Data is in a tuple of tuple(uint16, string, string, string).  
-For each tuple, the corresponding field are Room ID, Room Title, Player A, Player B.
+Data is in a tuple of tuple(uint16, string, string).  
+For each tuple, the corresponding field are Room ID, Player A, Player B.
 
 ### 2.8 Player list
 | Frame type | Direction |
@@ -123,8 +122,7 @@ This packet is used to obtain player list.
 Client send a packet with no payload to request data from server.  
 Server should response back with same frame type, and contains data for player list.
 
-Data is in a tuple of tuple(string, uint32, uint32).
-For each tuple, the corresponding field are Player Name, Game wins, Game lose.
+Data is in a tuple of string, which contains Player Name.
 
 ### 2.9 Join Game
 | Frame type | Direction | Room ID |
@@ -157,10 +155,10 @@ For invalid request, server may use other action like send a chat message, or di
 ### 2.11 Game restart
 | Frame type | Direction |
 |:----------:|:---------:|
-|     10     |  C <-> S  |
+|     10     |  C --> S  |
 
 This packet is used to restart a game. Game can only be restarted at end state (one side has win the game, or a tie).  
-Client send a packet to server, and server should response back with exactly same packet.  
+Client send a packet to server, to indicate update its ready state.  
 For invalid request, server may use other action like send a chat message, or disconnect the client.
 
 ### 2.12 Place
@@ -172,12 +170,12 @@ This packet is used to place a chess on board, the high 4 bit is x and low 4 bit
 Server doesn't response back, for a valid request, server should send "Board Update" instead.
 For invalid request, server may use other action like send a chat message, or disconnect the client.
 
-### 2.13 Board Update
-| Frame type | Direction |  Placed  |  Color  |
-|:----------:|:---------:|:--------:|:-------:|
-|     12     |  C <-- S  |  uint64  |  uint64 |
+### 2.13 Room Update
+| Frame type | Direction |  Placed  |  Color  |  Turn  |  White  |  Black  |
+|:----------:|:---------:|:--------:|:-------:|:------:|:-------:|:-------:|
+|     12     |  C <-- S  |  uint64  |  uint64 |  uint8 |  string |  string |
 
-This packet is update the current state of board. Since the board is 8x8, each bit of the first uint64 "Placed" is used to set if a point is placed, and the second uint64 set its color, white = 0, black = 1.
+This packet is update the current state of board. Since the board is 8x8, each bit of the first uint64 "Placed" is used to set if a point is placed, and the second uint64 set its color, black = 0, white = 1. Turn means who should place now, 0 = game over, 1 = black, 2 = white.
 
 ### 2.14 Chat message
 | Frame type | Direction | Player | Message |
